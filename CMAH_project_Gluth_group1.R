@@ -51,9 +51,6 @@ setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 # import packages
 library(tidyverse)
 library(ggplot2)
-library(ggstatsplot)
-
-
 
 # import the data
 dataset <- read.delim('data_allTrialTypes', header = TRUE, sep = ",")
@@ -98,26 +95,7 @@ data_aggregated %>%
                     ymax = mean_accuracy + sd_accuracy / sqrt(N)),
                 width = .15, position = position_dodge(.9)) + 
   # hide the legend
-  guides(color = F, fill = F) +
+  guides(color = "none", fill = "none") +
   labs(x = "Number of options recalled", y = "Accuracy/Consistency of Choice") +
   theme_minimal() 
-
-
-## violin plot with ggstatsplot
-data_aggregated %>%
-  mutate(recallType = factor(recallType)) %>%
-  # violin plot with statistical results
-  ggbetweenstats(x = recallType,
-                 y = accuracy) +
-  labs(x = "Number of options recalled",
-       y = "Accuracy/Consistency of Choice",
-       title = "Task 1") +
-  theme(axis.ticks = element_blank(),
-        axis.line = element_line(colour = "grey50"),
-        panel.grid = element_line(color = "#b4aea9"),
-        panel.grid.minor = element_blank(),
-        panel.grid.major.x = element_blank(),
-        panel.grid.major.y = element_line(linetype = "dashed"),
-        panel.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"),
-        plot.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"))
 
