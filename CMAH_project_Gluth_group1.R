@@ -44,11 +44,16 @@
 ## choiceRight: whether right option was chosen (= 1) or left option (= 0)
 
 
+# clear the environment
+rm(list = ls())
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
 # import packages
 library(tidyverse)
 library(ggplot2)
+library(ggstatsplot)
 
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
 
 # import the data
 dataset <- read.delim('data_allTrialTypes', header = TRUE, sep = ",")
@@ -77,7 +82,7 @@ data_aggregated <- merge(data_aggregated,
                                      sd_accuracy = sd(accuracy)),
                          by = "recallType")
 
-
+## barplot with errorbars
 data_aggregated %>%
   mutate(recallType = factor(recallType)) %>%
   ggplot(aes(x = recallType, y = accuracy, color = recallType, fill = recallType)) +
@@ -86,11 +91,33 @@ data_aggregated %>%
   # also display individual datapoints
   geom_jitter(width = .3, alpha = .8) +
   # make errorbars with confidence intervals
-  geom_errorbar(aes(ymin = mean_accuracy - 1.98 * sd_accuracy,
-                    ymax = mean_accuracy + 1.98 * sd_accuracy),
+  #geom_errorbar(aes(ymin = mean_accuracy - 1.98 * sd_accuracy,
+  #                  ymax = mean_accuracy + 1.98 * sd_accuracy),
+  #              width = .15, position = position_dodge(.9)) +
+  geom_errorbar(aes(ymin = mean_accuracy - sd_accuracy / sqrt(N),
+                    ymax = mean_accuracy + sd_accuracy / sqrt(N)),
                 width = .15, position = position_dodge(.9)) + 
   # hide the legend
   guides(color = F, fill = F) +
   labs(x = "Number of options recalled", y = "Accuracy/Consistency of Choice") +
   theme_minimal() 
+
+
+## violin plot with ggstatsplot
+data_aggregated %>%
+  mutate(recallType = factor(recallType)) %>%
+  # violin plot with statistical results
+  ggbetweenstats(x = recallType,
+                 y = accuracy) +
+  labs(x = "Number of options recalled",
+       y = "Accuracy/Consistency of Choice",
+       title = "Task 1") +
+  theme(axis.ticks = element_blank(),
+        axis.line = element_line(colour = "grey50"),
+        panel.grid = element_line(color = "#b4aea9"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(linetype = "dashed"),
+        panel.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"),
+        plot.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"))
 
