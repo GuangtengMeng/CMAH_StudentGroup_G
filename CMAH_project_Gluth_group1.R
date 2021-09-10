@@ -344,6 +344,8 @@ ggbetweenstats(df_data_plot, x = recallType, y = choiceSensitivity)
 # TODO: add Sebastians histogram
 
 
+t.test(bestParamsnmkSearch[,2] - 0)
+
 # prepare the data
 dataset %>%
   # filter trials where the value difference is zero (since they can't be
@@ -357,12 +359,12 @@ dataset %>%
 ## for given decisions (boundary), response times (RTs) and diffusion model
 ## parameters
 diffusion_deviance <- function(boundary, RTs, v, a, z = .5 * a, t0) {
-  eps <- .00000001
   likelihood <- ddiffusion(RTs, boundary, v = v, a = a, t0 = t0, z = z)
   # use a value very close to zero in case the returned likelihood is zero
   # (log(0) = -inf, leads to all kinds of bad things^^)
-  likelihood[likelihood == 0] <- eps
+  likelihood[likelihood == 0] <- .00000001
   deviance <- - 2 * sum(log(likelihood))
+  
   return(deviance)
 }
 
@@ -373,16 +375,22 @@ diffusion_deviance(dataset$boundary, dataset$RT, 0.3, 1, 0.5, 0.3)
 
 # fit the diffusion model to data of all participants
 results_dm <- vector(mode = "list", length = N)
-for (s_idx in 1:N) {
+
+for (s_idx in 1:length(subjects)) {
   subj_tmp <- subjects[[s_idx]]
   results_dm[[s_idx]] <- vector(mode = "list", length = 3)
-  for (recall_idx in 1:length(unique(dataset$recallType))) {
-    recall_tmp <- unique(dataset$recallType)[recall_idx]
+  
+  #for (recall_idx in 1:length(unique(dataset$recallType))) {
+   # recall_tmp <- unique(dataset$recallType)[recall_idx]
     # filter the relevant data for the respective subject: the decisions
     # ("upper" for correct, "lower" for incorrect decisions) and response times
     boundaries <- dataset$boundary[dataset$subjID == subj_tmp & 
-                                       dataset$recallType == recall_tmp]
-    RTs <- dataset$RT[dataset$subjID == subj_tmp & dataset$recallType == recall_tmp]
+                                     dataset$recallType == recall_tmp]
+    RTs <- dataset$RT[dataset$subjID == subj_tmp &
+                        dataset$recallType == recall_tmp]
+    choiceSensitivity_vector <- choiceSensitivity[1] * (recallType==0)+
+      choiceSensitivity[2] * (recallType==1)+
+      choiceSensitivity[3] * (recallType==2)
     
     # fit the model using the nmk() algorithm
     fitModel <- nmk(par = start_val, fn = function(par) {
