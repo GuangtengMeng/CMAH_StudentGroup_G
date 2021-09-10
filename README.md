@@ -5,6 +5,10 @@ Group Leader: Prof. Dr. Sebastian Gluth
 Participants: Ruth Hanssen, Marie Jakob, Jennifer March, Guangteng Meng, Malte Naujokat, Hannah Seidler, Jasmin Stein, Yuanwei Yao
 
 
+
+
+
+
 References
 
 Kraemer, P. M., Fontanesi, L., Spektor, M. S., & Gluth, S. (2020). Response time models separate single- and dual-process accounts of memory-based decisions. Psychonomic Bulletin & Review, 28(1), 304–323. https://doi.org/10.3758/s13423-020-01794-9
