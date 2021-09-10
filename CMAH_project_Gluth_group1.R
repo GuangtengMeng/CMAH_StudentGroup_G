@@ -44,16 +44,19 @@
 ## choiceRight: whether right option was chosen (= 1) or left option (= 0)
 
 
-# clear the environment
-rm(list = ls())
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-
 # import packages
 library(tidyverse)
 library(ggplot2)
+library(dfoptim)
+library(rtdists)
+
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 
 # import the data
 dataset <- read.delim('data_allTrialTypes', header = TRUE, sep = ",")
+
+#------------------------------------------------------------------------------#
+#### Task 1 ####
 
 ## accuracy choosing the higher-valued option
 dataset$correct <- 0
@@ -79,23 +82,218 @@ data_aggregated <- merge(data_aggregated,
                                      sd_accuracy = sd(accuracy)),
                          by = "recallType")
 
-## barplot with errorbars
+
 data_aggregated %>%
   mutate(recallType = factor(recallType)) %>%
   ggplot(aes(x = recallType, y = accuracy, color = recallType, fill = recallType)) +
   # display the mean accuracy in each condition with a bar
-  stat_summary(fun = mean, geom = "bar", width = .5, alpha = .3) +
+  stat_summary(fun = mean, geom = "bar", width = .3, alpha = .3) +
   # also display individual datapoints
-  geom_jitter(width = .3, alpha = .8) +
+  geom_jitter(width = .2, alpha = .8) +
   # make errorbars with confidence intervals
-  #geom_errorbar(aes(ymin = mean_accuracy - 1.98 * sd_accuracy,
-  #                  ymax = mean_accuracy + 1.98 * sd_accuracy),
-  #              width = .15, position = position_dodge(.9)) +
-  geom_errorbar(aes(ymin = mean_accuracy - sd_accuracy / sqrt(N),
-                    ymax = mean_accuracy + sd_accuracy / sqrt(N)),
+  geom_errorbar(aes(ymin = mean_accuracy - (1.98 * (sd_accuracy / sqrt(N))),
+                    ymax = mean_accuracy + (1.98 * (sd_accuracy / sqrt(N)))),
                 width = .15, position = position_dodge(.9)) + 
   # hide the legend
-  guides(color = "none", fill = "none") +
+  guides(color = F, fill = F) +
   labs(x = "Number of options recalled", y = "Accuracy/Consistency of Choice") +
-  theme_minimal() 
+  theme_minimal()
+
+#------------------------------------------------------------------------------#
+#### Task 2: Fit a logit model to the data ####
+
+#### simulate some data
+steps <- seq(-3, 3, 1)
+
+# returns the choice probability of the given value difference (valDiffSim)
+p_right <- function(valDiffSim, rightBias = 1, choiceSensitivity = 1) {
+  return(1 / (1 + exp(-rightBias - choiceSensitivity * valDiffSim)))
+}
+
+probabilities_sim <- p_right(valDiffSim = steps,
+                             rightBias = -10,
+                             choiceSensitivity = 1)
+plot(x = steps, y = probabilities_sim)
+
+
+#### build a likelihood function
+
+# returns the negative log likelihood for a given value difference and choice
+# according to the logit model
+choiceModel1 <- function(valDiff, choiceRight, recall_condition, 
+                         rightBias = 1, choiceSensitivity = c(1, 1, 1)) {
+  choiceSensitivity_vector <- choiceSensitivity[1] * (recallType==0)+
+    choiceSensitivity[2] * (recallType==1)+
+    choiceSensitivity[3] * (recallType==2)
+  p_right <- 1 / (1 + exp(-rightBias - choiceSensitivity_vector * valDiff))
+  neg_log_lik <- - (sum(log(p_right[choiceRight == 1])) + 
+    sum(log(1 - p_right[choiceRight == 0])))
+  return(neg_log_lik)
+}
+
+# test function
+choice_right_sim <- sample(c(0, 1), length(steps), replace = T)
+log_lik_sim <- choiceModel1(steps, choice_right_sim, choiceSensitivity = 1, 
+                            rightBias = 100)
+
+# plausible choices for the value diffs in steps (choose left for a negative
+# difference, right for 0 and a positive difference)
+choice_right_sim_plausible <- c(0, 0, 0, 1, 1, 1, 1)
+# reverse: very implausible choices
+choice_right_sim_implausible <- c(1, 1, 1, 0, 0, 0, 0)
+
+# compute the log likelihood for the two choices
+log_lik_plausible <- choiceModel1(steps, choice_right_sim_plausible, choiceSensitivity = 1, 
+                                  rightBias = 0)
+log_lik_implausible <- choiceModel1(steps, choice_right_sim_implausible, choiceSensitivity = 1, 
+                                  rightBias = 0)
+
+#### fit the logit model to the data using grid search
+
+# initialize some values 
+bias <- seq(-2, 2, .1)
+choiceSensitivity <- seq(-2, 2, .1)
+subjects <- unique(dataset$subjID)
+best_bias <- rep(NA, N)
+best_sensitivity <- rep(NA, N)
+best_nLL <- rep(1/0, N)
+
+# fit the model separately to all subjects by trying different values for 
+# both parameters
+for (s_idx in 1:N) {
+  subj_tmp <- subjects[s_idx]
+  for (bias_idx in 1:length(bias)) {
+    bias_tmp <- bias[bias_idx]
+    for (choice_sens_idx in 1:length(choiceSensitivity)) {
+      choice_sens_tmp <- choiceSensitivity[choice_sens_idx]
+      choiceRight <- dataset$choiceRight[which(dataset$subjID == subj_tmp)]
+      valDiff <- dataset$valDiff[which(dataset$subjID == subj_tmp)]
+      # compute the negative log likelihood of the parameter values in the current
+      # iteration for subejct subj_tmp
+      neg_log_lik <- choiceModel1(valDiff = valDiff,
+                                  choiceRight = choiceRight,
+                                  rightBias = bias_tmp,
+                                  choiceSensitivity = choice_sens_tmp)
+      # update the best parameter values if the values return a smaller (i.e., better)
+      # negative log likelihood
+      if (neg_log_lik < best_nLL[s_idx]) {
+        best_bias[s_idx] <- bias_tmp
+        best_sensitivity[s_idx] <- choice_sens_tmp
+        best_nLL[s_idx] <- neg_log_lik
+      }
+    }
+  }
+}
+
+
+#### Fit the model using an optimization algorithm (i.e., Nelder-Mead optimization)
+results <- vector(mode = "list", length = N)
+for (s_idx in 1:N) {
+  subj_tmp <- subjects[s_idx]
+  startVal <- c(best_bias[s_idx], best_sensitivity[s_idx])
+  choiceRight <- dataset$choiceRight[dataset$subjID == subj_tmp]
+  valDiff <- dataset$valDiff[dataset$subjID == subj_tmp]
+  fitModel <- nmk(par = startVal, fn = function(par) {
+    choiceModel1(rightBias = par[1],
+                 choiceSensitivity = par[2],
+                 choiceRight = choiceRight,
+                 valDiff = valDiff)
+    })
+  results[[s_idx]] <- fitModel
+}
+
+
+# test whether the built-in glm() function leads to the same results for the
+# first subjects
+data_test <- dataset[dataset$subjID == 1, ]
+model_test <- glm(choiceRight ~ valDiff, family = binomial(link = "logit"),
+                  data = data_test)
+
+# it does, yay :)
+
+
+#------------------------------------------------------------------------------#
+#### Day 4 ####
+
+results <- vector(mode = "list", length = N)
+for (s_idx in 1:N) {
+  # print("hi")
+  subj_tmp <- subjects[[s_idx]]
+  startVal <- c(best_bias[s_idx], rep(best_sensitivity[s_idx], 3))
+  choiceRight <- dataset$choiceRight[which(dataset$subjID == subj_tmp)]
+  valDiff <- dataset$valDiff[dataset$subjID == subj_tmp]
+  recallType <- dataset$recallType[dataset$subjID == subj_tmp]
+  fitModel <- nmk(par = startVal, fn = function(par) choiceModel1(rightBias = par[1],                   
+                 choiceSensitivity = par[2:4],
+                 choiceRight = choiceRight,
+                 valDiff = valDiff,
+                 recall_condition = recallType))
+  # print(fitModel$message)
+  results[[s_idx]] <- fitModel$par
+}
+
+
+
+#------------------------------------------------------------------------------#
+#### Fit a Diffusion Model ####
+
+# TODO: add Sebastians histogram
+
+
+
+# prepare the data
+dataset %>%
+  # filter trials where the value difference is zero (since they can't be
+  # allocated to either boundary)
+  filter(! is.na(correct)) %>%
+  # add a variable for the boundaries
+  mutate(boundary = ifelse(correct == 1, "upper", "lower")) -> dataset
+
+
+## returns the deviance of the four-parameter diffusion model 
+## for given decisions (boundary), response times (RTs) and diffusion model
+## parameters
+diffusion_deviance <- function(boundary, RTs, v, a, z = .5 * a, t0) {
+  eps <- .00000001
+  likelihood <- ddiffusion(RTs, boundary, v = v, a = a, t0 = t0, z = z)
+  # use a value very close to zero in case the returned likelihood is zero
+  # (log(0) = -inf, leads to all kinds of bad things^^)
+  likelihood[likelihood == 0] <- eps
+  deviance <- - 2 * sum(log(likelihood))
+  return(deviance)
+}
+
+# define arbitrary starting values
+start_val <- c(0.3, 1, 0.5, 0.3)
+# test if they lead to something sensible
+diffusion_deviance(dataset$boundary, dataset$RT, 0.3, 1, 0.5, 0.3)
+
+# fit the diffusion model to data of all participants
+results_dm <- vector(mode = "list", length = N)
+for (s_idx in 1:N) {
+  subj_tmp <- subjects[[s_idx]]
+  results_dm[[s_idx]] <- vector(mode = "list", length = 3)
+  for (recall_idx in 1:length(unique(dataset$recallType))) {
+    recall_tmp <- unique(dataset$recallType)[recall_idx]
+    # filter the relevant data for the respective subject: the decisions
+    # ("upper" for correct, "lower" for incorrect decisions) and response times
+    boundaries <- dataset$boundary[dataset$subjID == subj_tmp & 
+                                       dataset$recallType == recall_tmp]
+    RTs <- dataset$RT[dataset$subjID == subj_tmp & dataset$recallType == recall_tmp]
+    
+    # fit the model using the nmk() algorithm
+    fitModel <- nmk(par = start_val, fn = function(par) {
+      diffusion_deviance(boundary = boundaries,
+                         RTs = RTs,
+                         v = par[1],
+                         a = par[2],
+                         z = par[3],
+                         t0 = par[4])
+    })
+    # print(fitModel$message)
+    # store the results
+    results_dm[[s_idx]][[recall_idx]] <- fitModel
+  }
+}
+
 
