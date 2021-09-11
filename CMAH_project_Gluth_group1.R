@@ -44,29 +44,20 @@
 ## choiceRight: whether right option was chosen (= 1) or left option (= 0)
 
 
-# clear working environment
-rm(list=ls())
-
-# clear all plots
-if(!is.null(dev.list())) dev.off()
-
-### load required packages
-## for settling
+# import packages
 library(tidyverse)
-library(tidyquant)
-## for plotting
 library(ggplot2)
-library(ggdist)
-library(ggstatsplot)
-## for modeling
 library(dfoptim)
 library(rtdists)
+library(afex)
+library(RColorBrewer)
+library(stats)
 
-
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 
 # import the data
 dataset <- read.delim('data_allTrialTypes', header = TRUE, sep = ",")
+
+set.seed(104234)
 
 #------------------------------------------------------------------------------#
 #### Task 1 ####
@@ -111,6 +102,35 @@ data_aggregated %>%
   guides(color = F, fill = F) +
   labs(x = "Number of options recalled", y = "Accuracy/Consistency of Choice") +
   theme_minimal()
+ggsave("plots/accuracy.png", width = 6, height = 4)
+
+
+# same for the response times
+
+
+dataset %>%
+  group_by(subjID, recallType) %>%
+  summarize(mean_rt = mean(RT)) -> data_aggregated_RT
+
+data_aggregated_RT <- merge(data_aggregated_RT, data_aggregated_RT %>%
+                              group_by(recallType) %>%
+                              summarize(mean = mean(mean_rt),
+                                        sd = sd(mean_rt)))
+
+data_aggregated_RT %>%
+  mutate(recallType = factor(recallType)) %>%
+  ggplot(aes(x = recallType, y = mean_rt, color = recallType, fill = recallType)) +
+  geom_jitter(width = .2, alpha = .8) +
+  stat_summary(fun = mean, geom = "bar", width = .3, alpha = .3) +
+  geom_errorbar(aes(ymin = mean - (1.98 * (sd / sqrt(N))),
+                    ymax = mean + (1.98 * (sd / sqrt(N)))),
+                width = .15, position = position_dodge(.9)) + 
+  labs(x = "Number of options recalled", y = "Mean Individual Response Latencies") +
+  theme_minimal() +
+  guides(fill = F, color = F)
+ggsave("plots/RTs.png", width = 6, height = 4)
+
+
 
 #------------------------------------------------------------------------------#
 #### Task 2: Fit a logit model to the data ####
@@ -124,7 +144,7 @@ p_right <- function(valDiffSim, rightBias = 1, choiceSensitivity = 1) {
 }
 
 probabilities_sim <- p_right(valDiffSim = steps,
-                             rightBias = 0,
+                             rightBias = -10,
                              choiceSensitivity = 1)
 plot(x = steps, y = probabilities_sim)
 
@@ -133,218 +153,139 @@ plot(x = steps, y = probabilities_sim)
 
 # returns the negative log likelihood for a given value difference and choice
 # according to the logit model
-choiceModel1 <- function(valDiff, choiceRight, rightBias = 1, choiceSensitivity = 1) {
-  
-  p_right <- 1 / (1 + exp(-rightBias - choiceSensitivity * valDiff))
-  neg_log_lik <- - (sum(log(p_right[choiceRight == 1])) + sum(log(1 - p_right[choiceRight == 0])))
-  
+choiceModel1 <- function(valDiff, choiceRight, recall_condition, 
+                         rightBias = 1, choiceSensitivity = c(1, 1, 1)) {
+  # print("Hello???... It's me.")
+  choiceSensitivity_vector <- choiceSensitivity[1] * (recall_condition == 0) +
+    choiceSensitivity[2] * (recall_condition == 1) +
+    choiceSensitivity[3] * (recall_condition == 2)
+  p_right <- 1 / (1 + exp(-rightBias - choiceSensitivity_vector * valDiff))
+  neg_log_lik <- - (sum(log(p_right[choiceRight == 1])) + 
+    sum(log(1 - p_right[choiceRight == 0])))
   return(neg_log_lik)
 }
 
-# test function
-choice_right_sim <- sample(c(0, 1), length(steps), replace = T)
-log_lik_sim <- choiceModel1(steps, choice_right_sim, choiceSensitivity = 1, rightBias = 1)
 
-# plausible choices for the value diffs in steps (choose left for a negative
-# difference, right for 0 and a positive difference)
-choice_right_sim_plausible <- c(0, 0, 0, 1, 1, 1, 1)
-# reverse: very implausible choices
-choice_right_sim_implausible <- c(1, 1, 1, 0, 0, 0, 0)
-
-# compute the log likelihood for the two choices
-log_lik_plausible <- choiceModel1(steps, choice_right_sim_plausible, choiceSensitivity = 1, rightBias = 0)
-log_lik_implausible <- choiceModel1(steps, choice_right_sim_implausible, choiceSensitivity = 1, rightBias = 0)
-
-#### Task 2.2
-#### fit the logit model to the data using grid search
+#### Fit the logit model using grid search ####
 
 # initialize some values 
 bias <- seq(-2, 2, .1)
 choiceSensitivity <- seq(-2, 2, .1)
 subjects <- unique(dataset$subjID)
-best_bias <- rep(NA, length(subjects))
-best_sensitivity <- rep(NA, length(subjects))
-best_nLL <- rep(1/0, length(subjects))
-
-bestParamsGridSearch <- matrix(data = 1/0, nrow = length(subjects), ncol = 3)
-
+best_bias <- rep(NA, N)
+best_sensitivity <- rep(NA, N)
+best_nLL <- rep(1/0, N)
 
 # fit the model separately to all subjects by trying different values for 
 # both parameters
-for (s_idx in 1:length(subjects)) {
+for (s_idx in 1:N) {
   subj_tmp <- subjects[s_idx]
-  
   for (bias_idx in 1:length(bias)) {
     bias_tmp <- bias[bias_idx]
-    
     for (choice_sens_idx in 1:length(choiceSensitivity)) {
       choice_sens_tmp <- choiceSensitivity[choice_sens_idx]
-      
-      # feed the data irrespective of conditions
-      choiceRight <- dataset$choiceRight[dataset$subjID == subj_tmp]
-      valDiff <- dataset$valDiff[dataset$subjID == subj_tmp]
-      
+      choiceRight <- dataset$choiceRight[which(dataset$subjID == subj_tmp)]
+      valDiff <- dataset$valDiff[which(dataset$subjID == subj_tmp)]
       # compute the negative log likelihood of the parameter values in the current
-      # iteration for subj_tmp
-      neg_log_lik <- choiceModel1(valDiff = valDiff, choiceRight = choiceRight,
-                                  rightBias = bias_tmp, choiceSensitivity = choice_sens_tmp)
-      
+      # iteration for subejct subj_tmp
+      neg_log_lik <- choiceModel1(valDiff = valDiff,
+                                  choiceRight = choiceRight,
+                                  rightBias = bias_tmp,
+                                  choiceSensitivity = rep(choice_sens_tmp, 3),
+                                  recall_condition = rep(0, length(valDiff))
+                                  )
       # update the best parameter values if the values return a smaller (i.e., better)
       # negative log likelihood
-      if (neg_log_lik < bestParamsGridSearch[s_idx, 3]) {
-        bestParamsGridSearch[s_idx, 1] <- bias_tmp
-        bestParamsGridSearch[s_idx, 2] <- choice_sens_tmp
-        bestParamsGridSearch[s_idx, 3] <- neg_log_lik
+      if (neg_log_lik < best_nLL[s_idx]) {
+        best_bias[s_idx] <- bias_tmp
+        best_sensitivity[s_idx] <- choice_sens_tmp
+        best_nLL[s_idx] <- neg_log_lik
       }
     }
   }
 }
 
 
-
-
-#### Task 2.3
-#### Fit the model using an optimization algorithm (i.e., Nelder-Mead optimization)
-#nmk_results <- vector("list", length = N)
-bestParamsnmkSearch <- matrix(data = 1/0, nrow = length(subjects), ncol = 3)
-
-for (s_idx in 1:length(subjects)) {
+#### Fit the logit model using an optimization algorithm (i.e., Nelder-Mead optimization) ####
+results_logit <- vector(mode = "list", length = N)
+for (s_idx in 1:N) {
   subj_tmp <- subjects[s_idx]
-  
-  # starting value for two parameters
-  startVal <- c(bestParamsGridSearch[s_idx, 1], bestParamsGridSearch[s_idx, 2])
-  
-  # feed data
+  startVal <- c(best_bias[s_idx], best_sensitivity[s_idx])
   choiceRight <- dataset$choiceRight[dataset$subjID == subj_tmp]
   valDiff <- dataset$valDiff[dataset$subjID == subj_tmp]
-  
-  # use nmk function of R-package dfoptim
-  fitModel <- nmk(par = startVal, fn = function(par) {
-    choiceModel1(rightBias = par[1], choiceSensitivity = par[2],
-                 choiceRight = choiceRight, valDiff = valDiff)
+  fitModel <- optim(par = startVal, fn = function(par) {
+    choiceModel1(rightBias = par[1],
+                 choiceSensitivity = rep(par[2], 3),
+                 choiceRight = choiceRight,
+                 valDiff = valDiff,
+                 # give a vector with only one element because we don't take into
+                 # account the recall condition
+                 recall_condition = rep(0, length(valDiff)))
     })
-  
-  # save outputs and print convergence messages
-  bestParamsnmkSearch[s_idx, 1] <- fitModel$par[1]
-  bestParamsnmkSearch[s_idx, 2] <- fitModel$par[2]
-  bestParamsnmkSearch[s_idx, 3] <- fitModel$value
-
-  print(fitModel$message)
+  results_logit[[s_idx]] <- fitModel
 }
-
-
-
-#### Task 2.4
-#### Have a look at the parameter estimates
-
-# choiceSensitivity
-t.test(bestParamsnmkSearch[,1] - 0)
-
-# rightBiase
-t.test(bestParamsnmkSearch[,2] - 0)
 
 
 # test whether the built-in glm() function leads to the same results for the
 # first subjects
-bestParamsglmSearch <- matrix(data = 1/0, nrow = length(subjects), ncol = 3)
-
-
-for (s_idx in 1:length(subjects)) {
-  subj_tmp <- subjects[s_idx]
-  
-  # use glm function
-  fitModel <- glm(choiceRight ~ valDiff, family = binomial(link = "logit"),
-                  data = dataset[dataset$subjID == subj_tmp, ])
-  
-  # save outputs and print convergence messages
-  bestParamsglmSearch[s_idx, 1] <- fitModel$coefficients[[1]]
-  bestParamsglmSearch[s_idx, 2] <- fitModel$coefficients[[2]]
-  bestParamsglmSearch[s_idx, 3] <- fitModel$aic
-
-}
+data_test <- dataset[dataset$subjID == 1, ]
+model_test <- glm(choiceRight ~ valDiff, family = binomial(link = "logit"),
+                  data = data_test)
 
 # it does, yay :)
 
-plot(x = bestParamsnmkSearch[,2], y = bestParamsglmSearch[,2],
-     xlab = "Sensitivity parameter of choice model 1",
-     ylab = "Slope coefficient of logistic regression",
-     main = "Comparison between model and regression parameters")
-
-data_summarised <- dataset %>% 
-  group_by(subjID) %>%
-  summarise(frequency_choiceRight = mean(choiceRight, na.rm = T))
-
-plot(x = bestParamsnmkSearch[,1], y = data_summarised$frequency_choiceRight,
-     col = "red",
-     xlab = "Bias parameter of choice model 1",
-     ylab = "Frequency of choosing right option",
-     main = "Comparison model-based and descriptive choice bias")
-
 
 #------------------------------------------------------------------------------#
-#### Day 4 ####
-#### Task 3
-#### Assume that the choiceSensitivity parameter differs across conditions
+#### Fit the logit model (separate sensitivity parameters) ####
 
-choiceModel2 <- function(valDiff, choiceRight, recall_condition, 
-                         rightBias = 1, choiceSensitivity = c(1, 1, 1)) {
-  choiceSensitivity_vector <- choiceSensitivity[1] * (recallType==0)+
-    choiceSensitivity[2] * (recallType==1)+
-    choiceSensitivity[3] * (recallType==2)
-  p_right <- 1 / (1 + exp(-rightBias - choiceSensitivity_vector * valDiff))
-  neg_log_lik <- - (sum(log(p_right[choiceRight == 1])) + 
-                      sum(log(1 - p_right[choiceRight == 0])))
-  return(neg_log_lik)
-}
+results_sensitivity <- data.frame(matrix(nrow = 0, ncol = 6))
+names(results_sensitivity) <- c("subject", "choiceRight", "sensitivity_0", "sensitivity_1",
+                    "sensitivity_2", "deviance")
+startVal <- c(0.5, 0.5, 0.5, 0.5)
 
-
-#### Task 3.2
-bestParamsnmkSearch_conditions <- matrix(data = 1/0, nrow = length(subjects), ncol = 5)
-
-
-for (s_idx in 1:length(subjects)) {
-  subj_tmp <- subjects[s_idx]
-  
-  # starting value for two parameters, vector for sensitivity
-  startVal <- c(bestParamsGridSearch[s_idx, 1], rep(bestParamsGridSearch[s_idx, 2],3))
-  
-  # feed data
-  choiceRight <- dataset$choiceRight[dataset$subjID == subj_tmp]
+for (s_idx in 1:N) {
+  # print("hi")
+  subj_tmp <- subjects[[s_idx]]
+  # startVal <- c(best_bias[s_idx], rep(best_sensitivity[s_idx], 3))
+  choiceRight <- dataset$choiceRight[which(dataset$subjID == subj_tmp)]
   valDiff <- dataset$valDiff[dataset$subjID == subj_tmp]
   recallType <- dataset$recallType[dataset$subjID == subj_tmp]
-  
-  # use nmk function of R-package dfoptim
-  fitModel <- nmk(par = startVal, fn = function(par) 
-    choiceModel2(rightBias = par[1], choiceSensitivity = par[2:4],
-                 choiceRight = choiceRight, valDiff = valDiff, recall_condition = recallType))
-  
-  # save outputs and print convergence messages
-  for (i in 1:4) {
-    bestParamsnmkSearch_conditions[s_idx, i] <- fitModel$par[i]
-  }
-  bestParamsnmkSearch_conditions[s_idx, i+1] <- fitModel$value
-  
-  print(fitModel$message)
+  fitModel <- nmk(par = startVal, fn = function(par) {
+    choiceModel1(rightBias = par[1],                   
+                 choiceSensitivity = par[2:4],
+                 choiceRight = choiceRight,
+                 valDiff = valDiff,
+                 recall_condition = recallType)
+  })
+  results_tmp <- list(subj_tmp, fitModel$par[1], fitModel$par[2], fitModel$par[3],
+                      fitModel$par[4], fitModel$value)
+  names(results_tmp) <- names(results_sensitivity)
+  results_sensitivity <- rbind(results_sensitivity, results_tmp)
 }
 
-#### Task 3.3
-## compare the parameters across conditions with plot
-df_data_plot <- data.frame(recallType = c(rep(0,90), rep(1,90), rep(2,90)),
-                           choiceSensitivity = c(bestParamsnmkSearch_conditions[,2:4]))
 
-plot(x = df_data_plot$recallType, y = df_data_plot$choiceSensitivity, ylim = c(-0.2,1.0))
+#### Plot Results for Sensitivity Model ####
 
-ggbetweenstats(df_data_plot, x = recallType, y = choiceSensitivity)
-  
-  
-  
+results_sensitivity %>%
+  dplyr::select(-deviance) %>%
+  pivot_longer(cols = c(sensitivity_0, sensitivity_1, sensitivity_2),
+               names_to = "recall_condition", values_to = "parameter") %>%
+  mutate(recall_condition = str_sub(recall_condition, -1, -1)) %>%
+  ggplot(aes(x = recall_condition, y = parameter, group = recall_condition,
+             color = recall_condition, fill = recall_condition)) +
+  geom_jitter(alpha = .6, width = .13) + 
+  geom_boxplot(width = .4, alpha = .5) + 
+  theme_minimal() +
+  guides(fill = F, color = F) +
+  ylim(-1.5, 2) +
+  labs(y = "Sensitivity (Logit Model)", x = "Number of Options Recalled") +
+  guides(fill = F, color = F)
+ggsave("plots/sensitivity_params.png", width = 6, height = 4)
+
+
+
 #------------------------------------------------------------------------------#
-#### Fit a Diffusion Model ####
-
-# TODO: add Sebastians histogram
-
-
-t.test(bestParamsnmkSearch[,2] - 0)
+#### Fit a Diffusion Model to Choices + RTs ####
 
 # prepare the data
 dataset %>%
@@ -355,16 +296,16 @@ dataset %>%
   mutate(boundary = ifelse(correct == 1, "upper", "lower")) -> dataset
 
 
-## returns the deviance of the four-parameter diffusion model 
+## Returns the deviance of the four-parameter diffusion model 
 ## for given decisions (boundary), response times (RTs) and diffusion model
-## parameters
+## parameters (v, a, z, a, t0)
 diffusion_deviance <- function(boundary, RTs, v, a, z = .5 * a, t0) {
   likelihood <- ddiffusion(RTs, boundary, v = v, a = a, t0 = t0, z = z)
   # use a value very close to zero in case the returned likelihood is zero
-  # (log(0) = -inf, leads to all kinds of bad things^^)
-  likelihood[likelihood == 0] <- .00000001
+  # (log(0) = -inf, leads to all kinds of bad things)
+  eps <- .00000001
+  likelihood[likelihood == 0] <- eps
   deviance <- - 2 * sum(log(likelihood))
-  
   return(deviance)
 }
 
@@ -372,27 +313,28 @@ diffusion_deviance <- function(boundary, RTs, v, a, z = .5 * a, t0) {
 start_val <- c(0.3, 1, 0.5, 0.3)
 # test if they lead to something sensible
 diffusion_deviance(dataset$boundary, dataset$RT, 0.3, 1, 0.5, 0.3)
+# not Inf or -Inf --> ok
 
-# fit the diffusion model to data of all participants
-results_dm <- vector(mode = "list", length = N)
+##### fit the diffusion model to data of all participants
 
-for (s_idx in 1:length(subjects)) {
-  subj_tmp <- subjects[[s_idx]]
-  results_dm[[s_idx]] <- vector(mode = "list", length = 3)
-  
-  #for (recall_idx in 1:length(unique(dataset$recallType))) {
-   # recall_tmp <- unique(dataset$recallType)[recall_idx]
+# initialize the df to store results
+results_dm <- data.frame(matrix(nrow = 0, ncol = 7))
+names(results_dm) <- c("subject", "recall_condition", "drift", "threshold", 
+                       "starting_point", "non_decision_time", "deviance")
+subjects <- unique(dataset$subjID)
+recall_type <- unique(dataset$recallType)
+
+# loop through subjects + recall conditions
+for (subj_tmp in subjects) {
+  for (recall_tmp in recall_type) {
     # filter the relevant data for the respective subject: the decisions
     # ("upper" for correct, "lower" for incorrect decisions) and response times
     boundaries <- dataset$boundary[dataset$subjID == subj_tmp & 
-                                     dataset$recallType == recall_tmp]
-    RTs <- dataset$RT[dataset$subjID == subj_tmp &
+                                       dataset$recallType == recall_tmp]
+    RTs <- dataset$RT[dataset$subjID == subj_tmp & 
                         dataset$recallType == recall_tmp]
-    choiceSensitivity_vector <- choiceSensitivity[1] * (recallType==0)+
-      choiceSensitivity[2] * (recallType==1)+
-      choiceSensitivity[3] * (recallType==2)
     
-    # fit the model using the nmk() algorithm
+    # fit the model using the Nelder-Mead algorithm
     fitModel <- nmk(par = start_val, fn = function(par) {
       diffusion_deviance(boundary = boundaries,
                          RTs = RTs,
@@ -401,10 +343,101 @@ for (s_idx in 1:length(subjects)) {
                          z = par[3],
                          t0 = par[4])
     })
-    # print(fitModel$message)
-    # store the results
-    results_dm[[s_idx]][[recall_idx]] <- fitModel
+    # store results
+    results_tmp <- list(subj_tmp, recall_tmp, fitModel$par[1], fitModel$par[2],
+                       fitModel$par[3], fitModel$par[4], fitModel$value)
+    names(results_tmp) <- names(results_dm)
+    results_dm <- rbind(results_dm, results_tmp)
   }
 }
+
+# compute the relative starting point -> relative to the decision threshold
+results_dm %>% 
+  mutate(starting_point_relative = starting_point / threshold,
+         recall_condition = factor(recall_condition)) -> results_dm
+
+
+#------------------------------------------------------------------------------#
+#### Plot DM parameters ####
+
+# drift rate
+results_dm %>%
+  ggplot(aes(x = recall_condition, y = drift, group = recall_condition, 
+             color = recall_condition, fill = recall_condition)) +
+  # geom_violin(alpha = .4) +
+  geom_jitter(alpha = .6, width = .13) + 
+  geom_boxplot(width = .4, alpha = .5) + 
+  # geom_line(aes(y = mean(drift))) +
+  labs(y = "Drift Rate (v)", x = "Number of Options Recalled") +
+  theme_minimal() +
+  guides(fill = F, color = F)
+ggsave("plots/drift.png", width = 6, height = 4)
+# descriptive difference in drift rate
+
+# starting point
+results_dm %>%
+  ggplot(aes(x = recall_condition, y = starting_point / threshold, group = recall_condition, 
+             color = recall_condition, fill = recall_condition)) +
+  # geom_violin(alpha = .4) +
+  geom_jitter(alpha = .6, width = .13) + 
+  geom_boxplot(width = .4, alpha = .5) + 
+  theme_minimal() +
+  labs(y = "Starting Point (z, relative to the threshold)", x = "Number of Options Recalled") +
+  guides(fill = F, color = F)
+ggsave("plots/starting_point.png", width = 6, height = 4)
+
+# threshold
+results_dm %>%
+  ggplot(aes(x = recall_condition, y = threshold, group = recall_condition, 
+             color = recall_condition, fill = recall_condition)) +
+  # geom_violin(alpha = .4) +
+  geom_jitter(alpha = .6, width = .13) + 
+  geom_boxplot(width = .4, alpha = .5) + 
+  theme_minimal() +
+  labs(y = "Threshold (a)", x = "Number of Options Recalled") +
+  guides(fill = F, color = F)
+ggsave("plots/threshold.png", width = 6, height = 4)
+
+# non-decision time
+results_dm %>%
+  ggplot(aes(x = recall_condition, y = non_decision_time, group = recall_condition, 
+             color = recall_condition, fill = recall_condition)) +
+  # geom_violin(alpha = .4) +
+  geom_jitter(alpha = .6, width = .13) + 
+  geom_boxplot(width = .4, alpha = .5) + 
+  theme_minimal() +
+  labs(y = "Non-Decision Time (t0)", x = "Number of Options Recalled") +
+  guides(fill = F, color = F)
+ggsave("plots/non_decision_time.png", width = 6, height = 4)
+
+
+results_drift <- aov_ez(id = "subject",
+       dv = "drift",
+       data = results_dm,
+       within = c("recall_condition"),
+       anova_table = list(es = "pes"))
+# p < .001 (very significant^^)
+
+results_starting_point <- aov_ez(id = "subject",
+                                 dv = "starting_point_relative",
+                                 data = results_dm,
+                                 within = c("recall_condition"),
+                                 anova_table = list(es = "pes"))
+# n.s.
+
+results_threshold <- aov_ez(id = "subject",
+                                 dv = "threshold",
+                                 data = results_dm,
+                                 within = c("recall_condition"),
+                                anova_table = list(es = "pes"))
+# p < .001 significantly significant^^
+
+results_non_decision_time <- aov_ez(id = "subject",
+                            dv = "non_decision_time",
+                            data = results_dm,
+                            within = c("recall_condition"),
+                            anova_table = list(es = "pes"))
+# p = .028 -> slightly significant
+
 
 
